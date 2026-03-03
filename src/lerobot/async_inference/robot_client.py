@@ -141,13 +141,12 @@ class RobotClient:
     def _init_cosmos_monitor(self, cosmos_config: CosmosSafetyConfig) -> None:
         """Initialize Cosmos safety monitor if cosmos_safety module is available."""
         try:
+            import os
             import sys
             from pathlib import Path
 
-            # Add project root (parent of lerobot) to path for cosmos_safety import
-            _lerobot_src = Path(__file__).resolve().parent
-            _lerobot_root = _lerobot_src.parent.parent  # lerobot/src/lerobot -> lerobot
-            _project_root = _lerobot_root.parent  # cosmos project root
+            # Find cosmos project root: check COSMOS_ROOT env var, then cwd
+            _project_root = Path(os.environ.get("COSMOS_ROOT", Path.cwd()))
             if str(_project_root) not in sys.path:
                 sys.path.insert(0, str(_project_root))
 

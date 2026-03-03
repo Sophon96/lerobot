@@ -68,6 +68,8 @@ lerobot-record \
 """
 
 import logging
+import os
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -146,6 +148,7 @@ from lerobot.utils.utils import (
     init_logging,
     log_say,
 )
+from lerobot.async_inference.configs import CosmosSafetyConfig
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 
@@ -226,6 +229,11 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    # Cosmos safety configuration (optional)
+    cosmos_safety: CosmosSafetyConfig = field(
+        default_factory=CosmosSafetyConfig,
+        metadata={"help": "Cosmos safety monitor config. Set cosmos_safety.enabled=True to enable."},
+    )
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -299,6 +307,7 @@ def record_loop(
     single_task: str | None = None,
     display_data: bool = False,
     display_compressed_images: bool = False,
+    cosmos_monitor=None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -346,6 +355,9 @@ def record_loop(
 
         # Get robot observation
         obs = robot.get_observation()
+
+        if cosmos_monitor is not None:
+            cosmos_monitor.push_observation(obs)
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
@@ -399,11 +411,19 @@ def record_loop(
             action_values = act_processed_teleop
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
 
-        # Send action to robot
+        # Send action to robot (or hold position if Cosmos safety monitor has paused)
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-        _sent_action = robot.send_action(robot_action_to_send)
+        if cosmos_monitor is not None and cosmos_monitor.is_paused:
+            hold_action = {
+                key: float(obs[key])
+                for key in robot.action_features
+                if key in obs
+            }
+            _sent_action = robot.send_action(hold_action)
+        else:
+            _sent_action = robot.send_action(robot_action_to_send)
 
         # Write to dataset
         if dataset is not None:
@@ -516,6 +536,46 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 },
             )
 
+        # Initialize Cosmos safety monitor (optional)
+        cosmos_monitor = None
+        if cfg.cosmos_safety.enabled:
+            try:
+                # Find cosmos project root: check COSMOS_ROOT env var, then cwd
+                _project_root = Path(os.environ.get("COSMOS_ROOT", Path.cwd()))
+                if str(_project_root) not in sys.path:
+                    sys.path.insert(0, str(_project_root))
+
+                from cosmos_safety import (
+                    CosmosBinaryChecker,
+                    CosmosFullReasoner,
+                    CosmosSafetyMonitor,
+                    FrameBuffer,
+                )
+
+                prompt_path = Path(cfg.cosmos_safety.prompt_path)
+                if not prompt_path.is_absolute():
+                    prompt_path = _project_root / prompt_path
+
+                frame_buffer = FrameBuffer(
+                    max_frames=32,
+                    sample_rate=8,
+                    camera_keys=cfg.cosmos_safety.camera_keys,
+                )
+                binary_checker = CosmosBinaryChecker()
+                full_reasoner = CosmosFullReasoner(prompt_path=prompt_path)
+                cosmos_monitor = CosmosSafetyMonitor(
+                    frame_buffer=frame_buffer,
+                    binary_checker=binary_checker,
+                    full_reasoner=full_reasoner,
+                    binary_check_interval=cfg.cosmos_safety.binary_check_interval,
+                    min_frames_for_check=cfg.cosmos_safety.min_frames_for_check,
+                    camera_key=cfg.cosmos_safety.camera_keys[0] if cfg.cosmos_safety.camera_keys else None,
+                    prompt_path=prompt_path,
+                )
+                logging.info("Cosmos safety monitor initialized")
+            except Exception as e:
+                logging.warning(f"Could not initialize Cosmos safety monitor: {e}")
+
         robot.connect()
         if teleop is not None:
             teleop.connect()
@@ -531,6 +591,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+                if cosmos_monitor is not None:
+                    cosmos_monitor.start()
                 record_loop(
                     robot=robot,
                     events=events,
@@ -547,7 +609,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
                     display_compressed_images=display_compressed_images,
+                    cosmos_monitor=cosmos_monitor,
                 )
+                if cosmos_monitor is not None:
+                    cosmos_monitor.stop()
 
                 # Execute a few seconds without recording to give time to manually reset the environment
                 # Skip reset for the last episode to be recorded
@@ -584,6 +649,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 recorded_episodes += 1
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
+
+        if cosmos_monitor is not None:
+            cosmos_monitor.stop()
 
         if dataset:
             dataset.finalize()
