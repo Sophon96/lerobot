@@ -210,6 +210,29 @@ class DatasetRecordConfig:
 
 
 @dataclass
+class CosmosSafetyConfig:
+    """Configuration for Cosmos safety monitor (pour detection and trajectory validation)."""
+
+    enabled: bool = field(default=False, metadata={"help": "Enable Cosmos safety monitoring"})
+    binary_check_interval: float = field(
+        default=1.0,
+        metadata={"help": "Interval in seconds between binary 'about to pour' checks"},
+    )
+    min_frames_for_check: int = field(
+        default=8,
+        metadata={"help": "Minimum frames (at 4 fps) required for Cosmos clip"},
+    )
+    camera_keys: list[str] | None = field(
+        default=None,
+        metadata={"help": "Camera keys to use (e.g. ['front', 'top']). None = auto-detect"},
+    )
+    prompt_path: str | Path = field(
+        default="prompt.txt",
+        metadata={"help": "Path to prompt for full reasoning"},
+    )
+
+
+@dataclass
 class RecordConfig:
     robot: RobotConfig
     dataset: DatasetRecordConfig
@@ -229,7 +252,7 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
-    # Cosmos safety configuration (optional)
+    # Cosmos safety monitor (pour detection + trajectory validation).
     cosmos_safety: CosmosSafetyConfig = field(
         default_factory=CosmosSafetyConfig,
         metadata={"help": "Cosmos safety monitor config. Set cosmos_safety.enabled=True to enable."},
@@ -252,6 +275,49 @@ class RecordConfig:
     def __get_path_fields__(cls) -> list[str]:
         """This enables the parser to load config from the policy using `--policy.path=local/dir`"""
         return ["policy"]
+
+
+def _init_cosmos_monitor(cosmos_config: CosmosSafetyConfig) -> Any | None:
+    """Initialize Cosmos safety monitor if cosmos_safety module is available."""
+    try:
+        _lerobot_scripts = Path(__file__).resolve().parent
+        _lerobot_root = _lerobot_scripts.parent.parent  # lerobot/scripts -> lerobot
+        _project_root = _lerobot_root.parent  # cosmos project root
+        if str(_project_root) not in sys.path:
+            sys.path.insert(0, str(_project_root))
+
+        from cosmos_safety import (
+            CosmosBinaryChecker,
+            CosmosFullReasoner,
+            CosmosSafetyMonitor,
+            FrameBuffer,
+        )
+
+        prompt_path = Path(cosmos_config.prompt_path)
+        if not prompt_path.is_absolute():
+            prompt_path = _project_root / prompt_path
+
+        frame_buffer = FrameBuffer(
+            max_frames=32,
+            sample_rate=8,
+            camera_keys=cosmos_config.camera_keys,
+        )
+        binary_checker = CosmosBinaryChecker()
+        full_reasoner = CosmosFullReasoner(prompt_path=prompt_path)
+        monitor = CosmosSafetyMonitor(
+            frame_buffer=frame_buffer,
+            binary_checker=binary_checker,
+            full_reasoner=full_reasoner,
+            binary_check_interval=cosmos_config.binary_check_interval,
+            min_frames_for_check=cosmos_config.min_frames_for_check,
+            camera_key=cosmos_config.camera_keys[0] if cosmos_config.camera_keys else None,
+            prompt_path=prompt_path,
+        )
+        logging.info("Cosmos safety monitor initialized")
+        return monitor
+    except Exception as e:
+        logging.warning(f"Could not initialize Cosmos safety monitor: {e}")
+        return None
 
 
 """ --------------- record_loop() data flow --------------------------
@@ -307,7 +373,7 @@ def record_loop(
     single_task: str | None = None,
     display_data: bool = False,
     display_compressed_images: bool = False,
-    cosmos_monitor=None,
+    cosmos_monitor: Any = None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -365,8 +431,14 @@ def record_loop(
         if policy is not None or dataset is not None:
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
 
-        # Get action from either policy or teleop
-        if policy is not None and preprocessor is not None and postprocessor is not None:
+        # Get action from either policy or teleop (or hold when Cosmos paused)
+        if cosmos_monitor is not None and cosmos_monitor.is_paused:
+            hold_action = {
+                key: float(obs[key]) for key in robot.action_features if key in obs
+            }
+            action_values = hold_action
+            robot_action_to_send = robot_action_processor((hold_action, obs))
+        elif policy is not None and preprocessor is not None and postprocessor is not None:
             action_values = predict_action(
                 observation=observation_frame,
                 policy=policy,
@@ -403,26 +475,20 @@ def record_loop(
                 )
             continue
 
-        # Applies a pipeline to the action, default is IdentityProcessor
-        if policy is not None and act_processed_policy is not None:
-            action_values = act_processed_policy
-            robot_action_to_send = robot_action_processor((act_processed_policy, obs))
-        else:
-            action_values = act_processed_teleop
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+        # Applies a pipeline to the action, default is IdentityProcessor (skip when Cosmos hold)
+        if cosmos_monitor is None or not cosmos_monitor.is_paused:
+            if policy is not None and act_processed_policy is not None:
+                action_values = act_processed_policy
+                robot_action_to_send = robot_action_processor((act_processed_policy, obs))
+            else:
+                action_values = act_processed_teleop
+                robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
 
-        # Send action to robot (or hold position if Cosmos safety monitor has paused)
+        # Send action to robot (skip when Cosmos paused - robot holds last commanded position)
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-        if cosmos_monitor is not None and cosmos_monitor.is_paused:
-            hold_action = {
-                key: float(obs[key])
-                for key in robot.action_features
-                if key in obs
-            }
-            _sent_action = robot.send_action(hold_action)
-        else:
+        if cosmos_monitor is None or not cosmos_monitor.is_paused:
             _sent_action = robot.send_action(robot_action_to_send)
 
         # Write to dataset
@@ -483,6 +549,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     dataset = None
     listener = None
+    cosmos_monitor = None
+    if cfg.cosmos_safety.enabled:
+        cosmos_monitor = _init_cosmos_monitor(cfg.cosmos_safety)
+        if cosmos_monitor is not None:
+            cosmos_monitor.start()
 
     try:
         if cfg.resume:
@@ -636,6 +707,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         control_time_s=cfg.dataset.reset_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
+                        cosmos_monitor=cosmos_monitor,
                     )
 
                 if events["rerecord_episode"]:

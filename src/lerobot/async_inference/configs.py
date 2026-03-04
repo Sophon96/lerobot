@@ -14,7 +14,6 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import torch
 
@@ -174,12 +173,6 @@ class RobotClientConfig:
     # Debug configuration
     debug_visualize_queue_size: bool = field(
         default=False, metadata={"help": "Visualize the action queue size"}
-    )
-
-    # Cosmos safety configuration (optional)
-    cosmos_safety: CosmosSafetyConfig = field(
-        default_factory=CosmosSafetyConfig,
-        metadata={"help": "Cosmos safety monitor config. Set cosmos_safety.enabled=True to enable."},
     )
 
     @property

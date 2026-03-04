@@ -29,9 +29,7 @@ python src/lerobot/async_inference/robot_client.py \
     --actions_per_chunk=50 \
     --chunk_size_threshold=0.5 \
     --aggregate_fn_name=weighted_average \
-    --debug_visualize_queue_size=True \
-    # Enable Cosmos safety (pour detection + trajectory validation): \
-    # --cosmos_safety.enabled=True
+    --debug_visualize_queue_size=True
 ```
 """
 
@@ -62,7 +60,7 @@ from lerobot.transport import (
 from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
 from lerobot.utils.import_utils import register_third_party_plugins
 
-from .configs import RobotClientConfig, CosmosSafetyConfig
+from .configs import RobotClientConfig
 from .helpers import (
     Action,
     FPSTracker,
@@ -210,9 +208,6 @@ class RobotClient:
 
             self.shutdown_event.clear()
 
-            if self._cosmos_monitor is not None:
-                self._cosmos_monitor.start()
-
             return True
 
         except grpc.RpcError as e:
@@ -222,9 +217,6 @@ class RobotClient:
     def stop(self):
         """Stop the robot client"""
         self.shutdown_event.set()
-
-        if self._cosmos_monitor is not None:
-            self._cosmos_monitor.stop()
 
         self.robot.disconnect()
         self.logger.debug("Robot disconnected")
@@ -419,15 +411,6 @@ class RobotClient:
         action = {key: action_tensor[i].item() for i, key in enumerate(self.robot.action_features)}
         return action
 
-    def _get_hold_action(self) -> dict[str, float]:
-        """Get current joint positions for hold (pause) command."""
-        obs = self.robot.get_observation()
-        return {
-            key: float(obs[key])
-            for key in self.robot.action_features
-            if key in obs
-        }
-
     def control_loop_action(self, verbose: bool = False) -> dict[str, Any]:
         """Reading and performing actions in local queue"""
         # Lock only for queue operations
@@ -472,9 +455,6 @@ class RobotClient:
 
             raw_observation: RawObservation = self.robot.get_observation()
             raw_observation["task"] = task
-
-            if self._cosmos_monitor is not None:
-                self._cosmos_monitor.push_observation(raw_observation)
 
             with self.latest_action_lock:
                 latest_action = self.latest_action
@@ -529,11 +509,8 @@ class RobotClient:
 
         while self.running:
             control_loop_start = time.perf_counter()
-            """Control loop: (1) Performing actions, when available (or hold when Cosmos paused)"""
-            if self._cosmos_monitor is not None and self._cosmos_monitor.is_paused:
-                hold_action = self._get_hold_action()
-                _performed_action = self.robot.send_action(hold_action)
-            elif self.actions_available():
+            """Control loop: (1) Performing actions, when available"""
+            if self.actions_available():
                 _performed_action = self.control_loop_action(verbose)
 
             """Control loop: (2) Streaming observations to the remote policy server"""
