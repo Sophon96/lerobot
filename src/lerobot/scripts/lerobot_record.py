@@ -569,7 +569,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     full_reasoner=full_reasoner,
                     binary_check_interval=cfg.cosmos_safety.binary_check_interval,
                     min_frames_for_check=cfg.cosmos_safety.min_frames_for_check,
-                    camera_key=cfg.cosmos_safety.camera_keys[0] if cfg.cosmos_safety.camera_keys else None,
+                    camera_key=cfg.cosmos_safety.camera_key,
                     prompt_path=prompt_path,
                 )
                 logging.info("Cosmos safety monitor initialized")

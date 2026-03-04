@@ -175,7 +175,7 @@ class RobotClient:
                 full_reasoner=full_reasoner,
                 binary_check_interval=cosmos_config.binary_check_interval,
                 min_frames_for_check=cosmos_config.min_frames_for_check,
-                camera_key=cosmos_config.camera_keys[0] if cosmos_config.camera_keys else None,
+                camera_key=cosmos_config.camera_key,
                 prompt_path=prompt_path,
             )
             self.logger.info("Cosmos safety monitor initialized")

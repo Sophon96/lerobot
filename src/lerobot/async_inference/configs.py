@@ -60,6 +60,10 @@ class CosmosSafetyConfig:
         default=None,
         metadata={"help": "Camera keys to use (e.g. ['front', 'top']). None = auto-detect"},
     )
+    camera_key: str | None = field(
+        default="phone",
+        metadata={"help": "Single camera key to send to Cosmos reasoning (e.g. 'phone'). None = auto-detect"},
+    )
     prompt_path: str | Path = field(
         default="prompt.txt",
         metadata={"help": "Path to prompt for full reasoning"},
