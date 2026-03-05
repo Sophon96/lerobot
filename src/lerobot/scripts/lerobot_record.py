@@ -215,7 +215,7 @@ class CosmosSafetyConfig:
 
     enabled: bool = field(default=False, metadata={"help": "Enable Cosmos safety monitoring"})
     binary_check_interval: float = field(
-        default=1.0,
+        default=0.25,
         metadata={"help": "Interval in seconds between binary 'about to pour' checks"},
     )
     min_frames_for_check: int = field(
@@ -225,6 +225,10 @@ class CosmosSafetyConfig:
     camera_keys: list[str] | None = field(
         default=None,
         metadata={"help": "Camera keys to use (e.g. ['front', 'top']). None = auto-detect"},
+    )
+    camera_key: str | None = field(
+        default="phone",
+        metadata={"help": "Single camera key to send to Cosmos reasoning (e.g. 'phone'). None = auto-detect"},
     )
     prompt_path: str | Path = field(
         default="prompt.txt",
@@ -281,10 +285,8 @@ def _init_cosmos_monitor(cosmos_config: CosmosSafetyConfig) -> Any | None:
     """Initialize Cosmos safety monitor if cosmos_safety module is available."""
     try:
         _lerobot_scripts = Path(__file__).resolve().parent
-        _lerobot_root = _lerobot_scripts.parent.parent  # lerobot/scripts -> lerobot
-        _project_root = _lerobot_root.parent  # cosmos project root
-        if str(_project_root) not in sys.path:
-            sys.path.insert(0, str(_project_root))
+        if str(_lerobot_scripts) not in sys.path:
+            sys.path.insert(0, str(_lerobot_scripts))
 
         from cosmos_safety import (
             CosmosBinaryChecker,
@@ -293,6 +295,7 @@ def _init_cosmos_monitor(cosmos_config: CosmosSafetyConfig) -> Any | None:
             FrameBuffer,
         )
 
+        _project_root = _lerobot_scripts.parent.parent.parent.parent  # cosmos project root
         prompt_path = Path(cosmos_config.prompt_path)
         if not prompt_path.is_absolute():
             prompt_path = _project_root / prompt_path
@@ -310,7 +313,7 @@ def _init_cosmos_monitor(cosmos_config: CosmosSafetyConfig) -> Any | None:
             full_reasoner=full_reasoner,
             binary_check_interval=cosmos_config.binary_check_interval,
             min_frames_for_check=cosmos_config.min_frames_for_check,
-            camera_key=cosmos_config.camera_keys[0] if cosmos_config.camera_keys else None,
+            camera_key=cosmos_config.camera_key,
             prompt_path=prompt_path,
         )
         logging.info("Cosmos safety monitor initialized")
@@ -439,7 +442,7 @@ def record_loop(
             action_values = hold_action
             robot_action_to_send = robot_action_processor((hold_action, obs))
         elif policy is not None and preprocessor is not None and postprocessor is not None:
-            action_values = predict_action(
+            action_tensor = predict_action(
                 observation=observation_frame,
                 policy=policy,
                 device=get_safe_torch_device(policy.config.device),
@@ -450,7 +453,8 @@ def record_loop(
                 robot_type=robot.robot_type,
             )
 
-            act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
+            act_processed_policy: RobotAction = make_robot_action(action_tensor, dataset.features)
+            action_values = act_processed_policy
 
         elif policy is None and isinstance(teleop, Teleoperator):
             act = teleop.get_action()
@@ -611,10 +615,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         cosmos_monitor = None
         if cfg.cosmos_safety.enabled:
             try:
-                # Find cosmos project root: check COSMOS_ROOT env var, then cwd
-                _project_root = Path(os.environ.get("COSMOS_ROOT", Path.cwd()))
-                if str(_project_root) not in sys.path:
-                    sys.path.insert(0, str(_project_root))
+                _lerobot_scripts = Path(__file__).resolve().parent
+                if str(_lerobot_scripts) not in sys.path:
+                    sys.path.insert(0, str(_lerobot_scripts))
 
                 from cosmos_safety import (
                     CosmosBinaryChecker,
@@ -623,6 +626,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     FrameBuffer,
                 )
 
+                _project_root = _lerobot_scripts.parent.parent.parent.parent  # cosmos project root
                 prompt_path = Path(cfg.cosmos_safety.prompt_path)
                 if not prompt_path.is_absolute():
                     prompt_path = _project_root / prompt_path

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from collections.abc import Callable
+from pathlib import Path
 from dataclasses import dataclass, field
 
 import torch
@@ -48,7 +49,7 @@ class CosmosSafetyConfig:
 
     enabled: bool = field(default=False, metadata={"help": "Enable Cosmos safety monitoring"})
     binary_check_interval: float = field(
-        default=1.0,
+        default=0.25,
         metadata={"help": "Interval in seconds between binary 'about to pour' checks"},
     )
     min_frames_for_check: int = field(
